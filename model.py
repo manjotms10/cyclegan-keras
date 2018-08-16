@@ -14,7 +14,6 @@ from keras.optimizers import Adam
 from keras.preprocessing.image import img_to_array, load_img
 import numpy as np
 import glob
-import cv2
 
 def conv2d(input_layer, filters, kernel):
     w = Conv2D(filters=filters, kernel_size = kernel, strides=2, padding='same')(input_layer)
@@ -32,8 +31,8 @@ def deconv2d(input_layer, concat_layer, filters, kernel):
 
 class GAN():
     def __init__(self):
-        self.df = 64
-        self.batch_size = 16
+        self.df = 16
+        self.batch_size = 8
         self.epochs = 1
         self.input_image_shape = (256, 256, 3)
         
@@ -69,10 +68,11 @@ class GAN():
         
         self.combined = Model(inputs = [A, B],
                                      outputs = [valid_A, valid_B,
+                                                fake_A, fake_B,
                                                       rec_A, rec_B,
                                                       iden_A, iden_B])
     
-        self.combined.compile(loss=['mse','mse','mse','mse','mse','mse'], 
+        self.combined.compile(loss=['mse','mse','mse','mse','mse','mse','mse','mse'],
                               optimizer = Adam(lr=0.0002), 
                               metrics = ["accuracy"])
         
@@ -89,7 +89,7 @@ class GAN():
         y3 = deconv2d(y2, x1, self.df, (3,3))
         y4 = UpSampling2D(size=(2,2))(y3)
         
-        out = Conv2D(3, (3,3), padding='same')(y4)
+        out = Conv2D(3, (1,1), padding='same')(y4)
         
         return Model(inputs = inp, outputs = out)
     
@@ -100,48 +100,60 @@ class GAN():
         x3 = conv2d(x2, self.df*4, (3,3))
         x4 = conv2d(x3, self.df*8, (3,3))
         x5 = Flatten()(x4)
+        x5 = Dense(512, activation='relu')(x5)
         x6 = Dense(96, activation = 'relu')(x5)
-        x7 = Dense(1, activation='relu')(x6)
+        x7 = Dense(1, activation='sigmoid')(x6)
         
         return Model(inputs = inp, outputs = x7)
     
+    def load_image(self, path):
+        img = load_img(path, target_size = self.input_image_shape[:-1])
+        img = img_to_array(img)
+        img = img/127.5 - 1
+        return img
+    
     def data_generator(self):
-        train_a = glob.glob('datasets/apple2orange/trainA/*')
-        train_b = glob.glob('datasets/apple2orange/trainB/*')
-        x = []
-        y = []
+        train_a = glob.glob('datasets/cityscapes/trainA/*')
+        train_b = glob.glob('datasets/cityscapes/trainB/*')
+        
         while True:
+            x, y = [], []
             idx = np.random.choice(995, self.batch_size)
             for i in idx:
-                x.append(img_to_array(load_img(train_a[i])))
-                y.append(img_to_array(load_img(train_b[i])))
+                x.append(self.load_image(train_a[i]))
+                y.append(self.load_image(train_b[i]))
             x = np.array(x)
             y = np.array(y)
             
             yield x, y
             
-    def train(self):
+    def train(self, epochs = 15, batch_size = 8):
         data = self.data_generator()
-        epochs = self.epochs
-        fakes = np.zeros((self.batch_size, 1))
-        valid = np.ones((self.batch_size, 1))
+        fakes = np.zeros((batch_size, 1))
+        valid = np.ones((batch_size, 1))
         
         for ep in range(epochs):
             img_A, img_B = next(data)
             
-            l1 = self.d_A.train_on_batch(img_A, valid)
-            l2 = self.d_B.train_on_batch(img_B, valid)
-            
-            fake_B = self.gA2B.predict(img_A)
+            print('-- Training DA --')
+            self.d_A.fit(img_A, valid, epochs = 1, batch_size = batch_size)
             fake_A = self.gB2A.predict(img_B)
+            self.d_A.fit(fake_A, fakes, epochs = 1, batch_size = batch_size)
             
-            l3 = self.d_A.train_on_batch(fake_B, fakes)
-            l4 = self.d_A.train_on_batch(fake_A, fakes)
+            print('-- Training DB --')
+            self.d_B.fit(img_B, valid, epochs = 1, batch_size = batch_size)
+            fake_B = self.gA2B.predict(img_A)
+            self.d_B.fit(fake_B, fakes, epochs = 1, batch_size = batch_size)
             
-            hist = self.combined.train_on_batch([img_A, img_B], 
-                                                [valid, valid,
-                                                 img_A, img_B,
-                                                 img_A, img_B])
+            print('-- Training Combined Model --')
+            hist = self.combined.fit([img_A, img_B], 
+                                            [valid, valid,
+                                             img_B, img_A,
+                                             img_A, img_B,
+                                             img_A, img_B],
+                                             epochs = 1,
+                                             batch_size = batch_size)
+
         
 gan = GAN()
 gan.train()
